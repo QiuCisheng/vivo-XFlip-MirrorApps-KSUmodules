@@ -1,0 +1,224 @@
+#!/system/bin/sh
+# ctl —— 魔镜应用管理（写 fliplauncher/launcher.db 的 location_lib 表）
+#   ctl?a=add&p=<包名>&n=<名称>    添加（写入后自动重启外屏桌面）
+#   ctl?a=del&p=<包名>             移除（自动重启外屏桌面）
+#   ctl?a=up&p=<包名>              上移一位（自动重启）
+#   ctl?a=down&p=<包名>            下移一位（自动重启）
+#   ctl?a=restart                  只重启外屏桌面
+#   ctl?a=rename&p=<包名>&n=<名称>  改显示名（自动重启）
+
+echo "Content-Type: text/plain; charset=utf-8"
+echo "Cache-Control: no-store"
+echo
+
+DB=/data/user_de/0/com.vivo.fliplauncher/databases/launcher.db
+SQ=/data/local/mirrorapps/bin/sqlite3
+
+# 百分号解码（支持中文显示名）
+qd() {
+  printf '%b' "$(printf '%s' "$1" | sed -e 's/+/ /g' -e 's/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\\x\1/g')"
+}
+qv() {
+  printf '%s' "$QUERY_STRING" | tr '&' '\n' | sed -n "s/^$1=//p" | head -1
+}
+
+A=$(qv a)
+P=$(qv p)
+N=$(qd "$(qv n)")
+X=$(qv x)
+# 包名只保留合法字符，避免拼进 SQL 出问题
+P=$(printf '%s' "$P" | tr -cd 'A-Za-z0-9._')
+
+WL_KEY=fold_adaptive_screen_app_list
+LAB_KEY=fold_adaptive_app_not_in_lab
+AUTO_FILE=/data/local/mirrorapps/run/autorestart
+auto_on() { [ "$(cat $AUTO_FILE 2>/dev/null)" = "1" ]; }
+
+launcher_up() {
+  am start --display 1 -a android.intent.action.MAIN -c android.intent.category.HOME >/dev/null 2>&1
+  sleep 2
+}
+
+# fold_adaptive_app_not_in_lab：真正决定「能不能在外屏跑」的名单。
+# 不在里面 → vivo 桌面拉起 FlipToContinue（"请翻开手机继续使用"），表现为打不开。
+lab_add() {
+  CUR=$(settings get secure $LAB_KEY 2>/dev/null)
+  [ "$CUR" = "null" ] && CUR=""
+  case ",$CUR," in
+    *",$1,"*) return 0 ;;
+  esac
+  if [ -z "$CUR" ]; then NEW="$1"; else NEW="$CUR,$1"; fi
+  settings put secure $LAB_KEY "$NEW" 2>/dev/null
+}
+
+lab_del() {
+  CUR=$(settings get secure $LAB_KEY 2>/dev/null)
+  [ "$CUR" = "null" ] && CUR=""
+  case ",$CUR," in
+    *",$1,"*)
+      NEW=$(printf '%s' "$CUR" | tr ',' '\n' | grep -vx "$1" | tr '\n' ',' | sed 's/,$//')
+      settings put secure $LAB_KEY "$NEW" 2>/dev/null
+      ;;
+  esac
+}
+
+wl_add() {
+  CUR=$(settings get secure $WL_KEY 2>/dev/null)
+  [ "$CUR" = "null" ] && CUR=""
+  case ",$CUR," in
+    *",$1,"*) return 0 ;;
+  esac
+  if [ -z "$CUR" ]; then NEW="$1"; else NEW="$CUR,$1"; fi
+  settings put secure $WL_KEY "$NEW" 2>/dev/null
+}
+
+wl_del() {
+  CUR=$(settings get secure $WL_KEY 2>/dev/null)
+  [ "$CUR" = "null" ] && CUR=""
+  case ",$CUR," in
+    *",$1,"*)
+      NEW=$(printf '%s' "$CUR" | tr ',' '\n' | grep -vx "$1" | tr '\n' ',' | sed 's/,$//')
+      settings put secure $WL_KEY "$NEW" 2>/dev/null
+      ;;
+  esac
+}
+
+pre_write() {
+  if auto_on; then
+    am force-stop com.vivo.fliplauncher >/dev/null 2>&1
+    sleep 1
+  fi
+}
+
+apply_live() {
+  if auto_on; then
+    launcher_up
+    echo "LIVE=1"
+  else
+    echo "LIVE=0"
+  fi
+}
+
+restart_launcher() {
+  am force-stop com.vivo.fliplauncher >/dev/null 2>&1
+  sleep 1
+  launcher_up
+}
+
+# 按当前 rank 顺序重新编号 0,1,2…（逐行更新，避免自引用 update 出错）
+renum() {
+  i=0
+  for id in $("$SQ" "$DB" "select _id from location_lib order by rank, _id;" 2>/dev/null); do
+    "$SQ" "$DB" "update location_lib set rank=$i where _id=$id;" 2>/dev/null
+    i=$((i + 1))
+  done
+}
+
+exists() {
+  C=$("$SQ" "$DB" "select count(*) from location_lib where intent like '$1/%';" 2>/dev/null)
+  [ "$C" != "0" ] && [ -n "$C" ]
+}
+
+[ -f "$DB" ] || { echo "ERR=NO_DB"; exit 0; }
+
+case "$A" in
+  restart)
+    restart_launcher
+    echo "RESULT=已重启外屏桌面"
+    ;;
+
+  wlfix)
+    N=0
+    for pkg in $("$SQ" "$DB" "select distinct substr(intent,1,instr(intent,'/')-1) from location_lib;" 2>/dev/null); do
+      wl_add "$pkg"
+      lab_add "$pkg"
+      N=$((N + 1))
+    done
+    echo "RESULT=已把 $N 个应用同步进外屏白名单"
+    ;;
+
+  auto)
+    mkdir -p /data/local/mirrorapps/run 2>/dev/null
+    V=$(qv v)
+    if [ "$V" = "1" ]; then echo 1 > "$AUTO_FILE"; echo "RESULT=已开启：写入后自动重启外屏桌面"
+    else echo 0 > "$AUTO_FILE"; echo "RESULT=已关闭：写入后不重启，需手动点「重启外屏桌面」"; fi
+    echo "AUTO=$(cat $AUTO_FILE 2>/dev/null)"
+    ;;
+
+  add)
+    [ -n "$P" ] || { echo "ERR=缺包名"; exit 0; }
+    if [ -z "$X" ]; then
+      X=$(cmd package resolve-activity --brief "$P" 2>/dev/null | tail -1)
+    fi
+    case "$X" in
+      */*) ;;
+      *) echo "ERR=找不到启动组件（应用没装？）"; exit 0 ;;
+    esac
+    CP=${X%%/*}
+    CC=${X#*/}
+    case "$CC" in .*) CC="$CP$CC" ;; esac
+    INTENT="$CP/$CC"
+    [ -n "$N" ] || N="$CP"
+    N=$(printf '%s' "$N" | sed "s/'/''/g")
+    NOW="$(date +%s)000"
+
+    # 两个名单都要写：lab 名单决定能否在外屏运行，白名单是「魔镜应用管理」的候选池
+    wl_add "$CP"
+    lab_add "$CP"
+
+    # 开启自动重启时：先停桌面再写库，避免被内存里的旧数据覆盖
+    pre_write
+    "$SQ" "$DB" "delete from location_lib where intent like '$CP/%';" 2>/dev/null
+    R=$("$SQ" "$DB" "select coalesce(max(rank),-1)+1 from location_lib;" 2>/dev/null)
+    "$SQ" "$DB" "insert into location_lib (intent,title,container,screen,cellX,cellY,spanX,spanY,itemType,rank,modified) values ('$INTENT','$N',-120,-1,-1,-1,1,1,30,$R,$NOW);" 2>&1
+    renum
+    apply_live
+    echo "RESULT=已添加 $N"
+    echo "INTENT=$INTENT"
+    ;;
+
+  del)
+    [ -n "$P" ] || { echo "ERR=缺包名"; exit 0; }
+    exists "$P" || { echo "ERR=它不在列表里"; exit 0; }
+    wl_del "$P"
+    lab_del "$P"
+    pre_write
+    "$SQ" "$DB" "delete from location_lib where intent like '$P/%'; delete from attribute where intent like '$P/%';" 2>/dev/null
+    renum
+    apply_live
+    echo "RESULT=已移除 $P"
+    ;;
+
+  rename)
+    [ -n "$P" ] || { echo "ERR=缺包名"; exit 0; }
+    [ -n "$N" ] || { echo "ERR=缺名称"; exit 0; }
+    exists "$P" || { echo "ERR=它不在列表里"; exit 0; }
+    N=$(printf '%s' "$N" | sed "s/'/''/g")
+    NOW="$(date +%s)000"
+    pre_write
+    "$SQ" "$DB" "update location_lib set title='$N', modified=$NOW where intent like '$P/%';" 2>/dev/null
+    apply_live
+    echo "RESULT=已改名 $N"
+    ;;
+
+  up|down)
+    [ -n "$P" ] || { echo "ERR=缺包名"; exit 0; }
+    exists "$P" || { echo "ERR=它不在列表里"; exit 0; }
+    R=$("$SQ" "$DB" "select rank from location_lib where intent like '$P/%' limit 1;" 2>/dev/null)
+    if [ "$A" = "up" ]; then
+      P2=$("$SQ" "$DB" "select max(rank) from location_lib where rank < $R;" 2>/dev/null)
+    else
+      P2=$("$SQ" "$DB" "select min(rank) from location_lib where rank > $R;" 2>/dev/null)
+    fi
+    if [ -z "$P2" ]; then echo "RESULT=已经到头了"; exit 0; fi
+    pre_write
+    "$SQ" "$DB" "update location_lib set rank=-1 where rank=$R; update location_lib set rank=$R where rank=$P2; update location_lib set rank=$P2 where rank=-1;" 2>/dev/null
+    renum
+    apply_live
+    echo "RESULT=已调整顺序"
+    ;;
+
+  *)
+    echo "ERR=未知操作"
+    ;;
+esac

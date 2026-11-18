@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>魔镜应用管理</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#101013">
+<style>
+  :root{--bg:#101013;--card:#1b1b20;--fg:#f2f2f5;--dim:#8e8e96;--acc:#4c8dff;--danger:#ff5a5f;--ok:#37c77f}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,"PingFang SC","Noto Sans CJK SC",sans-serif;padding:16px 14px 40px}
+  h1{font-size:18px;margin:4px 0 2px;font-weight:600}
+  .sub{color:var(--dim);font-size:12px;margin-bottom:14px}
+  .bar{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+  button{font:inherit;border:0;border-radius:10px;padding:9px 14px;background:#2a2a31;color:var(--fg)}
+  button.primary{background:var(--acc);color:#fff}
+  button:active{opacity:.65}
+  h2{font-size:13px;color:var(--dim);margin:18px 0 8px;font-weight:500;letter-spacing:.04em}
+  .item{display:flex;align-items:center;gap:10px;background:var(--card);border-radius:12px;padding:10px 12px;margin-bottom:8px}
+  .item .t{flex:1;min-width:0}
+  .item .n{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .item .p{font-size:11px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mini{background:#2a2a31;padding:7px 9px;border-radius:9px;font-size:13px;line-height:1;color:var(--fg)}
+  .mini.warn{color:var(--danger)}
+  .mini.add{background:var(--acc);color:#fff;font-weight:600}
+  .empty{color:var(--dim);font-size:13px;padding:10px 2px}
+  #toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#000d;color:#fff;padding:10px 16px;border-radius:20px;font-size:13px;opacity:0;transition:.25s;pointer-events:none;max-width:90vw;text-align:center}
+  #toast.show{opacity:1}
+  .spin{opacity:.4}
+  .sw{display:flex;align-items:center;gap:12px;background:var(--card);border-radius:12px;padding:12px 14px;margin-bottom:16px}
+  .sw .lab{flex:1;min-width:0;font-size:14px}
+  .sw .lab small{display:block;color:var(--dim);font-size:11px;margin-top:2px}
+  .toggle{position:relative;width:46px;height:27px;border-radius:14px;background:#3a3a42;transition:.2s;flex:none}
+  .toggle.on{background:var(--ok)}
+  .toggle i{position:absolute;top:3px;left:3px;width:21px;height:21px;border-radius:50%;background:#fff;transition:.2s}
+  .toggle.on i{left:22px}
+</style>
+</head>
+<body>
+<h1>魔镜应用管理</h1>
+<div class="sub">直接管理 vivo 外屏桌面的应用列表</div>
+<div class="bar">
+  <button class="primary" id="reload">刷新</button>
+  <button id="restart">重启外屏桌面</button>
+  <button id="wlfix">同步外屏白名单</button>
+</div>
+
+<div class="sw">
+  <div class="lab">写入后自动重启外屏桌面<small id="autoHint">关闭：改完需手动点「重启外屏桌面」才生效</small></div>
+  <div class="toggle" id="autoSw"><i></i></div>
+</div>
+
+<h2>已添加 <span id="cnt" style="color:var(--dim)"></span></h2>
+<div id="added"></div>
+
+<h2>可添加（已安装应用）</h2>
+<div id="avail"></div>
+
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let added = [], apps = [], labels = {}, auto = false;
+
+function toast(msg){
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove('show'), 1800);
+}
+
+async function get(url){
+  const r = await fetch(url, {cache:'no-store'});
+  return await r.text();
+}
+
+function parse(txt){
+  const rows = [], aps = [], lbs = {};
+  txt.split('\n').forEach(l=>{
+    l = l.trim();
+    if (l.startsWith('ROW=')){
+      const p = l.slice(4).split('|');
+      if (p.length >= 4){
+        const wl = p.length >= 5 ? p.pop() === '1' : true;
+        rows.push({rank:+p[0], name:p[1], pkg:p[2], intent:p.slice(3).join('|'), wl});
+      }
+    } else if (l.startsWith('APP=')){
+      aps.push(l.slice(4));
+    } else if (l.startsWith('AUTO=')){
+      auto = l.slice(5).trim() === '1';
+    } else if (l.startsWith('LABEL=')){
+      const p = l.slice(6).split('|');
+      if (p.length >= 2 && p[1]) lbs[p[0]] = p.slice(1).join('|');
+    }
+  });
+  return {rows, aps, lbs};
+}
+
+function guessName(pkg){
+  if (labels[pkg]) return labels[pkg];
+  const s = pkg.split('.').pop() || pkg;
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+async function load(){
+  document.body.classList.add('spin');
+  try{
+    const txt = await get('cgi-bin/status');
+    const {rows, aps, lbs} = parse(txt);
+    added = rows; apps = aps; labels = lbs;
+    renderAuto();
+    render();
+  }catch(e){ toast('读取失败：' + e.message); }
+  document.body.classList.remove('spin');
+}
+
+function renderAuto(){
+  const sw = $('#autoSw');
+  sw.classList.toggle('on', auto);
+  $('#autoHint').textContent = auto
+    ? '开启：每次改动会重启外屏桌面（约 3 秒）'
+    : '关闭：改完需手动点「重启外屏桌面」才生效';
+}
+
+function render(){
+  const box = $('#added');
+  $('#cnt').textContent = '(' + added.length + ')';
+  if(!added.length){ box.innerHTML = '<div class="empty">还没有添加任何应用</div>'; }
+  else {
+    box.innerHTML = added.map((r,i)=>`
+      <div class="item">
+        <div class="t"><div class="n">${esc(r.name || '(无名称)')}${r.wl ? '' : ' <span style="color:#ffb020;font-size:11px">· 未入外屏白名单</span>'}</div><div class="p">${esc(r.pkg)}</div></div>
+        <button class="mini" data-up="${esc(r.pkg)}" ${i===0?'disabled':''}>↑</button>
+        <button class="mini" data-down="${esc(r.pkg)}" ${i===added.length-1?'disabled':''}>↓</button>
+        <button class="mini" data-rename="${esc(r.pkg)}">改名</button>
+        <button class="mini warn" data-del="${esc(r.pkg)}">✕</button>
+      </div>`).join('');
+  }
+  const have = new Set(added.map(r=>r.pkg));
+  const rest = apps.filter(p=>!have.has(p));
+  $('#avail').innerHTML = rest.length ? rest.map(p=>`
+      <div class="item">
+        <div class="t"><div class="n">${esc(guessName(p))}</div><div class="p">${esc(p)}</div></div>
+        <button class="mini add" data-add="${esc(p)}">添加</button>
+      </div>`).join('') : '<div class="empty">没有可添加的应用</div>';
+}
+
+function esc(s){ return String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function act(qs, okMsg){
+  document.body.classList.add('spin');
+  try{
+    const txt = await get('cgi-bin/ctl?' + qs);
+    const line = txt.split('\n').find(l=>l.startsWith('RESULT=') || l.startsWith('ERR='));
+    let msg = line ? line.replace(/^(RESULT|ERR)=/, '') : '完成';
+    if (txt.includes('LIVE=0') && !txt.includes('ERR=')) msg += ' · 点「重启外屏桌面」生效';
+    toast(msg);
+  }catch(e){ toast('失败：' + e.message); }
+  document.body.classList.remove('spin');
+  await load();
+}
+
+document.addEventListener('click', async e=>{
+  const b = e.target.closest('button'); if(!b) return;
+  if (b.id === 'reload') return load();
+  if (b.id === 'restart') return act('a=restart');
+  if (b.id === 'wlfix') return act('a=wlfix');
+  if (b.id === 'autoSw') return act('a=auto&v=' + (auto ? '0' : '1'));
+  if (b.closest('#autoSw')) return act('a=auto&v=' + (auto ? '0' : '1'));
+  const d = b.dataset;
+  if (d.del){
+    const it = added.find(r=>r.pkg===d.del);
+    if (!confirm('从魔镜列表移除「' + (it ? it.name : d.del) + '」？')) return;
+    return act('a=del&p=' + encodeURIComponent(d.del));
+  }
+  if (d.up)    return act('a=up&p=' + encodeURIComponent(d.up));
+  if (d.down)  return act('a=down&p=' + encodeURIComponent(d.down));
+  if (d.rename){
+    const cur = added.find(r=>r.pkg===d.rename);
+    const n = prompt('显示名称', cur ? cur.name : guessName(d.rename));
+    if (n && n.trim()) return act('a=rename&p=' + encodeURIComponent(d.rename) + '&n=' + encodeURIComponent(n.trim()));
+    return;
+  }
+  if (d.add){
+    const n = prompt('显示名称（外屏桌面上看到的名字）', guessName(d.add));
+    if (n && n.trim()) return act('a=add&p=' + encodeURIComponent(d.add) + '&n=' + encodeURIComponent(n.trim()));
+  }
+});
+
+load();
+</script>
+</body>
+</html>

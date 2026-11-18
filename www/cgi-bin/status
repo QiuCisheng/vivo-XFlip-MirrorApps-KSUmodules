@@ -1,0 +1,36 @@
+#!/system/bin/sh
+# status —— 输出魔镜应用列表（真实存储：fliplauncher/launcher.db 的 location_lib 表）
+# 输出纯文本，便于前端解析：
+#   ROW=<rank>|<title>|<pkg>|<intent>
+#   APP=<已安装第三方包名>
+#   PID=<外屏桌面 pid>
+
+echo "Content-Type: text/plain; charset=utf-8"
+echo "Cache-Control: no-store"
+echo
+
+DB=/data/user_de/0/com.vivo.fliplauncher/databases/launcher.db
+SQ=/data/local/mirrorapps/bin/sqlite3
+TMP=/data/local/mirrorapps/run/db.snapshot
+
+[ -f "$DB" ] || { echo "ERR=NO_DB"; exit 0; }
+mkdir -p /data/local/mirrorapps/run 2>/dev/null
+cp "$DB" "$TMP" 2>/dev/null || { echo "ERR=COPY"; exit 0; }
+
+WL=$(settings get secure fold_adaptive_app_not_in_lab 2>/dev/null)
+[ "$WL" = "null" ] && WL=""
+"$SQ" "$TMP" "select rank||'|'||title||'|'||substr(intent,1,instr(intent,'/')-1)||'|'||intent from location_lib order by rank;" 2>/dev/null | while IFS= read -r line; do
+  pkg=$(printf '%s' "$line" | cut -d'|' -f3)
+  case ",$WL," in
+    *",$pkg,"*) echo "ROW=$line|1" ;;
+    *) echo "ROW=$line|0" ;;
+  esac
+done
+
+# 应用真实显示名（attribute 表是 vivo 桌面维护的已安装应用名表，可直接当名称来源）
+"$SQ" "$TMP" "select substr(intent,1,instr(intent,'/')-1)||'|'||title from attribute where instr(intent,'/')>0;" 2>/dev/null | sed 's/^/LABEL=/'
+
+pm list packages -3 2>/dev/null | sed 's/^package://' | sort | sed 's/^/APP=/'
+
+echo "AUTO=$(cat /data/local/mirrorapps/run/autorestart 2>/dev/null || echo 0)"
+echo "PID=$(pidof com.vivo.fliplauncher)"
